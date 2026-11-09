@@ -1,0 +1,12 @@
+# Local environment values and credentials
+.env
+.env.*
+!.env.example
+
+# .NET build output
+**/bin/
+**/obj/
+
+# JetBrains local workspace state
+.idea/
+*.sln.DotSettings.user
