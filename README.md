@@ -15,50 +15,21 @@ This solution demonstrates two separate ingress paths:
 
 ```mermaid
 flowchart LR
-    Marketing[Marketing platform or caller]
-    API[LeadIntegration.Api]
-    Auth[API key filter and rate limiter]
-    Validate[Marketing lead validation]
-    Map[SalesforceLeadMapper]
-    SyncClient[Typed SalesforceLeadClient]
-    Simulator[Salesforce.Simulator.Api]
-    LeadStore[In-memory lead repository]
-    EventStore[In-memory event/idempotency store]
-    Publisher[RabbitMqLeadMessagePublisher]
-    Exchange[Durable direct exchange]
-    Queue[Durable lead.events queue]
-    Worker[LeadProcessingBackgroundService]
-    Retry[Durable retry queue with message TTL]
-    DLQ[Dead-letter exchange and queue]
-    Observer[Optional RequestCatcher inbound observer]
-    RequestCatcher[RequestCatcher /incoming]
+    Marketing[Marketing platform]
+    Integration[LeadIntegration.Api<br/>webhooks and background consumer]
+    RabbitMQ[(RabbitMQ)]
+    Salesforce[Salesforce Simulator API]
 
-    Marketing -->|POST /webhooks/leads| API
-    API --> Auth --> Validate --> Map
-    Map -->|Synchronous HTTP POST| SyncClient -->|POST /api/salesforce/leads| Simulator
-    Simulator -->|201 Created| SyncClient
-    SyncClient --> API
-    API --> LeadStore
-    API -->|201 after synchronous completion| Marketing
+    Marketing -->|Synchronous webhook| Integration
+    Integration -->|HTTP| Salesforce
 
-    Marketing -->|POST /webhooks/leads/async| API
-    API --> Auth --> Validate --> EventStore
-    EventStore --> Map
-    Map --> Publisher
-    Publisher -->|Persistent message; publisher confirm| Exchange
-    Exchange -->|lead.created| Queue
-    Queue -->|Manual ACK after processing| Worker
-    Worker -->|Mapped Salesforce DTO| Simulator
-    Worker -->|Transient failure, confirmed publish| Retry
-    Retry -->|TTL dead-letter route| Queue
-    Worker -->|Permanent or exhausted failure| DLQ
-    API -->|202 after broker confirmation| Marketing
-
-    API -.->|Optional best-effort POST /incoming| Observer
-    Observer -.-> RequestCatcher
+    Marketing -->|Asynchronous webhook| Integration
+    Integration -->|Publish lead event| RabbitMQ
+    RabbitMQ -->|Consume event| Integration
+    Integration -->|HTTP| Salesforce
 ```
 
-The consumer uses a durable retry queue with per-message TTL, a dead-letter exchange/queue, and manual acknowledgements. Event status and Simulator idempotency are in memory and are not durable across restarts. There is no outgoing RequestCatcher observer.
+The synchronous webhook waits for the Simulator response. The asynchronous webhook publishes to RabbitMQ; a background consumer in `LeadIntegration.Api` processes the event afterward. The Salesforce endpoint is a local simulation, not a real Salesforce connection.
 
 ## Technology Stack
 
