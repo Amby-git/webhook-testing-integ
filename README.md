@@ -2,6 +2,8 @@
 
 A .NET 10 learning and portfolio project that demonstrates how a marketing platform can submit lead events to an integration API, how those events can be validated and mapped for a CRM, and how synchronous HTTP and asynchronous RabbitMQ flows differ. The CRM endpoint in this repository is an **in-memory Salesforce Simulator**; this project does not connect to a real Salesforce org.
 
+**Contents:** [Overview](#project-overview) · [Architecture](#architecture) · [APIs](#api-documentation) · [Run locally](#running-locally) · [Tests](#testing) · [Limitations](#current-limitations)
+
 ## Project Overview
 
 Marketing platforms often send lead data through webhooks. An integration layer must authenticate the sender, validate and normalize its payload, protect against duplicate submissions, translate the source contract into the target CRM contract, and handle downstream failures without exposing sensitive details.
@@ -14,22 +16,20 @@ This solution demonstrates two separate ingress paths:
 ## Architecture
 
 ```mermaid
-flowchart LR
-    Marketing[Marketing platform]
-    Integration[LeadIntegration.Api<br/>webhooks and background consumer]
-    RabbitMQ[(RabbitMQ)]
-    Salesforce[Salesforce Simulator API]
-
-    Marketing -->|Synchronous webhook| Integration
-    Integration -->|HTTP| Salesforce
-
-    Marketing -->|Asynchronous webhook| Integration
-    Integration -->|Publish lead event| RabbitMQ
-    RabbitMQ -->|Consume event| Integration
-    Integration -->|HTTP| Salesforce
+flowchart TB
+    Marketing[Marketing platform] -->|POST /webhooks/leads or /webhooks/leads/async| API[LeadIntegration.Api]
+    API -->|Sync: send lead and wait| SyncCRM[Salesforce Simulator API]
+    API -->|Async: publish event, return 202| Rabbit[(RabbitMQ)]
+    Rabbit --> Consumer[Background consumer in LeadIntegration.Api]
+    Consumer -->|Send lead| AsyncCRM[Salesforce Simulator API]
 ```
 
-The synchronous webhook waits for the Simulator response. The asynchronous webhook publishes to RabbitMQ; a background consumer in `LeadIntegration.Api` processes the event afterward. The Salesforce endpoint is a local simulation, not a real Salesforce connection.
+| Flow | What happens | Webhook response |
+|---|---|---|
+| Synchronous | The API sends the lead to the Simulator and waits for its response. | `201 Created` after processing |
+| Asynchronous | The API publishes the event to RabbitMQ. A background consumer later sends the lead to the Simulator. | `202 Accepted` after RabbitMQ confirms publication |
+
+The Salesforce endpoint is a local simulation, not a real Salesforce connection.
 
 ## Technology Stack
 
@@ -82,7 +82,7 @@ The Simulator accepts an `Idempotency-Key` derived from `SourcePlatform + EventI
 
 ### RequestCatcher observability
 
-When enabled, the inbound observer sends a normalized copy of the async marketing request and explicit metadata to `POST https://webhooks.requestcatcher.com/incoming`. It is disabled by default and failures are best-effort. The observer does not copy incoming headers; it creates only explicit correlation, event and source metadata headers. The payload can contain personal lead data, so use synthetic data for development. There is no `/outgoing` observer yet.
+The inbound observer sends a normalized copy of the async marketing request and explicit metadata to `POST https://webhooks.requestcatcher.com/incoming`. It is enabled in the checked-in Development configuration and disabled by default elsewhere. Failures are best-effort. The observer does not copy incoming headers; it creates only explicit correlation, event and source metadata headers. The payload can contain personal lead data, so use synthetic data for development. There is no `/outgoing` observer yet.
 
 See [RequestCatcher development instructions](docs/requestcatcher-observability.md) for the enable/disable settings and UI workflow.
 
@@ -190,14 +190,14 @@ ASP.NET Core configuration supports environment variables using `__` between sec
 | `RabbitMq__MaximumRetryCount` | Retries after the initial processing attempt; default `5` |
 | `RabbitMq__InitialRetryDelayMilliseconds` / `RabbitMq__MaximumRetryDelayMilliseconds` | Exponential retry delay bounds; defaults `1000` and `30000` milliseconds |
 | `RabbitMq__RetryExchangeName`, `RabbitMq__RetryQueueName`, `RabbitMq__DeadLetterExchangeName`, `RabbitMq__DeadLetterQueueName` | Retry and dead-letter topology names |
-| `RequestCatcher__Enabled` | Enables inbound RequestCatcher observation; default `false` |
+| `RequestCatcher__Enabled` | Enables inbound RequestCatcher observation; default `false`, set to `true` in Development configuration |
 | `RequestCatcher__BaseUrl` | RequestCatcher base URL; Development default is `https://webhooks.requestcatcher.com` |
 | `RequestCatcher__TimeoutSeconds` | RequestCatcher HTTP timeout; Development default is 2 seconds (validated range: 1–5) |
 | `SalesforceSimulator__FailureMode` | Simulator failure mode: `None`, `TooManyRequests`, `InternalServerError`, `ServiceUnavailable` |
 
 Compose automatically reads `.env` for the RabbitMQ container, but the .NET API does not automatically import it. Pass the RabbitMQ username and password into the API process, for example in a Rider run configuration. Keep API keys and credentials out of source control and logs. The Development appsettings contains convenience-only development configuration; use environment-specific secrets for shared environments.
 
-To enable RequestCatcher in a Development run configuration, set `RequestCatcher__Enabled=true`. Remove the override or set it to `false` to disable. The feature observes only inbound async webhooks at `/incoming`; outgoing observation is not implemented.
+The checked-in Development configuration enables RequestCatcher. Set `RequestCatcher__Enabled=false` in a Rider run configuration to disable it. The feature observes only inbound async webhooks at `/incoming`; outgoing observation is not implemented.
 
 ## Testing
 
