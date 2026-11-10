@@ -20,4 +20,5 @@ public sealed record LeadEventStatus(
     int AttemptCount,
     DateTimeOffset CreatedAt,
     DateTimeOffset LastUpdatedAt,
-    string? FailureReason = null);
+    string? FailureReason = null,
+    string? SalesforceId = null);

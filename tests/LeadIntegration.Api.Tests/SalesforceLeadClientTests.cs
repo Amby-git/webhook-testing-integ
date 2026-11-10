@@ -51,6 +51,41 @@ public sealed class SalesforceLeadClientTests
     }
 
     [Fact]
+    public async Task CreateLead_BadGateway_Handles502()
+    {
+        var client = CreateClient(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadGateway)));
+
+        var result = await client.CreateLeadAsync(ValidLead(), CancellationToken.None);
+
+        Assert.Equal(SalesforceClientFailure.BadGateway, result.Failure);
+        Assert.Equal(502, result.HttpStatusCode);
+    }
+
+    [Fact]
+    public async Task CreateLead_GatewayTimeout_Handles504()
+    {
+        var client = CreateClient(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.GatewayTimeout)));
+
+        var result = await client.CreateLeadAsync(ValidLead(), CancellationToken.None);
+
+        Assert.Equal(SalesforceClientFailure.GatewayTimeout, result.Failure);
+        Assert.Equal(504, result.HttpStatusCode);
+    }
+
+    [Fact]
+    public async Task CreateLead_IdempotencyKey_IsForwardedToSimulator()
+    {
+        var handler = new IdempotencyCaptureHandler();
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://simulator.test/") };
+        var client = new SalesforceLeadClient(httpClient, NullLogger<SalesforceLeadClient>.Instance);
+
+        var result = await client.CreateLeadAsync(ValidLead(), CancellationToken.None, "HubSpot:event-42");
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("HubSpot:event-42", handler.IdempotencyKey);
+    }
+
+    [Fact]
     public async Task CreateLead_BadRequest_Handles400()
     {
         const string downstreamDetail = "sensitive downstream validation detail";
@@ -116,5 +151,17 @@ public sealed class SalesforceLeadClientTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             send(cancellationToken);
+    }
+
+    private sealed class IdempotencyCaptureHandler : HttpMessageHandler
+    {
+        public string? IdempotencyKey { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            IdempotencyKey = request.Headers.GetValues("Idempotency-Key").Single();
+            return JsonResponse(HttpStatusCode.OK,
+                """{"id":"00Q000000000001ABC","firstName":"Ada","company":"Analytical Engines Ltd"}""");
+        }
     }
 }

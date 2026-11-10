@@ -3,6 +3,8 @@ using System.Net.Http.Json;
 using LeadIntegration.Api.Features.Leads;
 using LeadIntegration.Api.Features.Messaging;
 using LeadIntegration.Api.Features.RequestCatcher;
+using LeadIntegration.Api.Contracts.Marketing;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace LeadIntegration.Api.Tests;
 
@@ -152,6 +154,33 @@ public sealed class LeadAsyncWebhookTests
         Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
         Assert.Equal(LeadEventProcessingStatus.Accepted, status?.Status);
         Assert.Equal(0, status?.AttemptCount);
+    }
+
+    [Fact]
+    public async Task FailedEventEndpoint_ReturnsSanitizedFailureDiagnostics()
+    {
+        using var factory = new TestApiFactory();
+        var store = factory.Services.GetRequiredService<ILeadEventStore>();
+        var request = new MarketingLeadWebhookRequest(
+            "mkt-001", "HubSpot", "Ada", "Lovelace", "ada@example.com",
+            "Analytical Engines Ltd", "+35312345678", "spring-2026",
+            DateTimeOffset.Parse("2026-11-09T10:15:00Z"), "event-001");
+        var message = new LeadProcessingMessage(
+            request.EventId!, request.SourcePlatform!, "corr-failed", DateTimeOffset.UtcNow,
+            new LeadIntegration.Api.Features.Salesforce.SalesforceLeadMapper().Map(request));
+        store.MarkAccepted(message);
+        store.MarkFailed(message, 3, "Salesforce request failed with Unavailable.");
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Webhook-Api-Key", "test-api-key");
+
+        var failed = await client.GetFromJsonAsync<LeadEventStatus[]>("/integration/events/failed");
+
+        var item = Assert.Single(failed!);
+        Assert.Equal("event-001", item.EventId);
+        Assert.Equal(LeadEventProcessingStatus.Failed, item.Status);
+        Assert.Equal(3, item.AttemptCount);
+        Assert.Contains("Unavailable", item.FailureReason);
+        Assert.DoesNotContain("ada@example.com", item.FailureReason);
     }
 
     private static Task<HttpResponseMessage> PostEventAsync(

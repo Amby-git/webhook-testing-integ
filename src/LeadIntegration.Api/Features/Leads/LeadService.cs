@@ -42,7 +42,11 @@ public sealed class LeadService(
         try
         {
             var salesforcePayload = salesforceLeadMapper.Map(request);
-            var salesforceResult = await salesforceLeadClient.CreateLeadAsync(salesforcePayload, cancellationToken);
+            var salesforceIdempotencyKey = $"{sourcePlatform.ToUpperInvariant()}:{(string.IsNullOrWhiteSpace(idempotencyKey) ? request.EventId!.Trim() : idempotencyKey.Trim())}";
+            var salesforceResult = await salesforceLeadClient.CreateLeadAsync(
+                salesforcePayload,
+                cancellationToken,
+                salesforceIdempotencyKey);
             if (!salesforceResult.Succeeded)
             {
                 logger.LogWarning(
@@ -92,6 +96,8 @@ public sealed class LeadService(
         SalesforceClientFailure.RateLimited => LeadProcessingStatus.SalesforceRateLimited,
         SalesforceClientFailure.InternalServerError => LeadProcessingStatus.SalesforceInternalError,
         SalesforceClientFailure.Unavailable => LeadProcessingStatus.SalesforceUnavailable,
+        SalesforceClientFailure.BadGateway => LeadProcessingStatus.SalesforceInternalError,
+        SalesforceClientFailure.GatewayTimeout => LeadProcessingStatus.SalesforceTimeout,
         SalesforceClientFailure.Network => LeadProcessingStatus.SalesforceNetworkError,
         SalesforceClientFailure.Timeout => LeadProcessingStatus.SalesforceTimeout,
         _ => LeadProcessingStatus.SalesforceUnexpectedResponse

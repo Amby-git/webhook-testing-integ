@@ -8,8 +8,8 @@ Marketing platforms often send lead data through webhooks. An integration layer 
 
 This solution demonstrates two separate ingress paths:
 
-- A synchronous webhook that calls the Salesforce Simulator over HTTP and stores the resulting lead in an in-memory repository.
-- An asynchronous webhook that publishes a mapped message to RabbitMQ and returns after the broker confirms publication. A background consumer has **not** been implemented, so those messages remain queued.
+- A synchronous webhook that calls the Salesforce Simulator over HTTP, stores the resulting lead in an in-memory repository, and returns `201 Created` after processing completes.
+- An asynchronous webhook that publishes a mapped message to RabbitMQ and returns `202 Accepted` after the broker confirms publication. A hosted consumer processes the message separately and updates in-memory event status.
 
 ## Architecture
 
@@ -27,7 +27,9 @@ flowchart LR
     Publisher[RabbitMqLeadMessagePublisher]
     Exchange[Durable direct exchange]
     Queue[Durable lead.events queue]
-    NoConsumer["No consumer implemented; messages remain queued"]
+    Worker[LeadProcessingBackgroundService]
+    Retry[Durable retry queue with message TTL]
+    DLQ[Dead-letter exchange and queue]
     Observer[Optional RequestCatcher inbound observer]
     RequestCatcher[RequestCatcher /incoming]
 
@@ -37,7 +39,7 @@ flowchart LR
     Simulator -->|201 Created| SyncClient
     SyncClient --> API
     API --> LeadStore
-    API -->|202 after synchronous work| Marketing
+    API -->|201 after synchronous completion| Marketing
 
     Marketing -->|POST /webhooks/leads/async| API
     API --> Auth --> Validate --> EventStore
@@ -45,14 +47,18 @@ flowchart LR
     Map --> Publisher
     Publisher -->|Persistent message; publisher confirm| Exchange
     Exchange -->|lead.created| Queue
-    Queue -.-> NoConsumer
+    Queue -->|Manual ACK after processing| Worker
+    Worker -->|Mapped Salesforce DTO| Simulator
+    Worker -->|Transient failure, confirmed publish| Retry
+    Retry -->|TTL dead-letter route| Queue
+    Worker -->|Permanent or exhausted failure| DLQ
     API -->|202 after broker confirmation| Marketing
 
     API -.->|Optional best-effort POST /incoming| Observer
     Observer -.-> RequestCatcher
 ```
 
-The diagram shows implemented paths. There is no RabbitMQ consumer, retry processor, or outgoing RequestCatcher observer in the current source.
+The consumer uses a durable retry queue with per-message TTL, a dead-letter exchange/queue, and manual acknowledgements. Event status and Simulator idempotency are in memory and are not durable across restarts. There is no outgoing RequestCatcher observer.
 
 ## Technology Stack
 
@@ -73,7 +79,7 @@ src/
     ApiDocumentation/           OpenAPI examples and operation metadata
     Contracts/Marketing/        Inbound marketing webhook contract
     Features/Leads/              Lead endpoints, domain model, validation and in-memory repository
-    Features/Messaging/          Async event acceptance, event status and RabbitMQ publisher
+    Features/Messaging/          Async acceptance, RabbitMQ publisher/consumer, retry policy and event status
     Features/RequestCatcher/     Optional inbound RequestCatcher observer
     Features/Salesforce/         Salesforce DTO mapper and typed simulator HTTP client
     Infrastructure/              ProblemDetails exception handler
@@ -91,15 +97,17 @@ docs/                            RabbitMQ and RequestCatcher development guides
 
 ### Synchronous webhook
 
-`POST /webhooks/leads` requires `X-Webhook-Api-Key` and is rate-limited. `MarketingLeadValidator` validates required fields and email format. `LeadService` reserves a deduplication key and email, maps the marketing request with `SalesforceLeadMapper`, then calls `SalesforceLeadClient` using a typed `HttpClient`. The Simulator validates and stores the lead in memory, returning `201 Created`. The integration API records the Salesforce-style ID locally and returns its implemented `202 Accepted` response.
-
-Although this path calls Salesforce Simulator synchronously and waits for its result, it currently returns `202` after that work completes. This is the existing API behavior; it should not be interpreted as a background completion model.
+`POST /webhooks/leads` requires `X-Webhook-Api-Key` and is rate-limited. `MarketingLeadValidator` validates required fields and email format. `LeadService` reserves a deduplication key and email, maps the marketing request with `SalesforceLeadMapper`, then calls `SalesforceLeadClient` using a typed `HttpClient`. The Simulator validates and stores the lead in memory, returning `201 Created`. The integration API records the Salesforce-style ID locally and returns `201 Created` with the stored lead resource location.
 
 ### Asynchronous webhook publishing
 
-`POST /webhooks/leads/async` validates the inbound request and deduplicates by `SourcePlatform + EventId` using an in-memory event store. It maps the request to `SalesforceLeadDto`, wraps it in a `LeadProcessingMessage` containing event ID, source platform, correlation ID, acceptance timestamp and mapped lead, then publishes it to RabbitMQ. It returns `202 Accepted` after the broker confirms publication; it does not call the Salesforce Simulator.
+`POST /webhooks/leads/async` validates the inbound request and deduplicates by `SourcePlatform + EventId` using an in-memory event store. It maps the request to `SalesforceLeadDto`, wraps it in a `LeadProcessingMessage` containing event ID, source platform, correlation ID, acceptance timestamp and mapped lead, then publishes it to RabbitMQ. It returns `202 Accepted` after the broker confirms publication. `LeadProcessingBackgroundService` consumes from the same durable queue and calls the existing Salesforce client.
 
-The publisher declares a durable direct exchange, durable queue and binding, sends persistent JSON messages, and awaits publisher confirms. RabbitMQ configuration defaults to exchange `lead.events`, queue `lead.events` and routing key `lead.created`.
+The publisher declares a durable direct exchange, durable queue and binding, sends persistent JSON messages, and awaits publisher confirms. The publisher and consumer share a long-lived connection and use separate channels. The consumer uses manual ACKs and prefetch. RabbitMQ configuration defaults to exchange `lead.events`, queue `lead.events` and routing key `lead.created`.
+
+Transient Salesforce failures (`429`, `5xx`, network errors, and timeouts) are retried with capped exponential backoff; a positive `Retry-After` value is honored. Permanent failures and messages that exceed the configured retry count are published to a dead-letter exchange and queue. The original message is ACKed only after retry or dead-letter publishing is confirmed. The retry queue uses TTL-based dead-letter routing back to the main exchange, avoiding a blocking sleep in the normal retry path.
+
+The Simulator accepts an `Idempotency-Key` derived from `SourcePlatform + EventId`. Repeated delivery returns the existing record during the Simulator process lifetime. This demonstrates idempotent processing; it is not a durable exactly-once guarantee.
 
 ### RequestCatcher observability
 
@@ -124,9 +132,10 @@ The OpenAPI JSON documents are available at `/openapi/v1.json` on each applicati
 
 | Method and route | Purpose | Implemented responses |
 |---|---|---|
-| `POST /webhooks/leads` | Synchronous marketing lead submission to the Salesforce Simulator | `202`, `400`, `401`, `409`, `422`, `429`, `500`, `502`, `503`, `504` |
+| `POST /webhooks/leads` | Synchronous marketing lead submission to the Salesforce Simulator | `201`, `400`, `401`, `409`, `422`, `429`, `500`, `502`, `503`, `504` |
 | `POST /webhooks/leads/async` | Validate, map and publish a lead event to RabbitMQ | `202`, `400`, `401`, `409`, `429`, `503` |
 | `GET /integration/events/{sourcePlatform}/{eventId}` | Read the current in-memory status for an accepted async event | `200`, `401`, `404` |
+| `GET /integration/events/failed` | List in-memory events with terminal processing failures | `200`, `401` |
 | `GET /leads` | List leads stored by the synchronous flow | `200`, `500` |
 | `GET /leads/{id}` | Read a lead by GUID | `200`, `400`, `404`, `500` |
 | `PUT /leads/{id}` | Update a stored lead | `200`, `400`, `404`, `409`, `422`, `500` |
@@ -140,7 +149,7 @@ The two webhook routes require `X-Webhook-Api-Key`. Both are rate-limited. The s
 
 | Method and route | Purpose | Implemented responses |
 |---|---|---|
-| `POST /api/salesforce/leads` | Validate and create an in-memory simulated Salesforce lead | `201`, `400`, `429`, `500`, `503` |
+| `POST /api/salesforce/leads` | Validate and create an in-memory simulated Salesforce lead, or return its prior record for the same idempotency key | `201`, `200`, `400`, `429`, `500`, `503` |
 | `GET /api/salesforce/leads` | List simulated leads | `200`, `429`, `500`, `503` |
 | `GET /api/salesforce/leads/{id}` | Read a simulated lead by Salesforce-style ID | `200`, `404`, `429`, `500`, `503` |
 | `PUT /api/salesforce/leads/{id}` | Replace fields on an existing simulated lead | `200`, `400`, `404`, `429`, `500`, `503` |
@@ -167,7 +176,7 @@ Both webhook routes accept the marketing contract. `Phone` and `CampaignId` are 
 
 ### Response behavior
 
-- The synchronous route returns `202` only after the Salesforce Simulator has created the record and the integration API has stored its local representation.
+- The synchronous route returns `201` after the Salesforce Simulator has created the record and the integration API has stored its local representation.
 - The asynchronous route returns `202` after RabbitMQ confirms publication. Its body includes an event ID, `Accepted` status and status URL.
 - Invalid payloads return `400`; duplicate requests/events return `409`; webhook authentication failures return `401`.
 - Synchronous downstream failures are translated to `422`, `429`, `502`, `503` or `504` as appropriate. Unexpected/local errors may return `500`.
@@ -205,6 +214,11 @@ ASP.NET Core configuration supports environment variables using `__` between sec
 | `RabbitMq__HostName`, `RabbitMq__Port`, `RabbitMq__VirtualHost` | RabbitMQ connection address; Development defaults are `localhost`, `5672`, `/` |
 | `RabbitMq__UserName`, `RabbitMq__Password` | RabbitMQ credentials supplied to the API process |
 | `RabbitMq__ExchangeName`, `RabbitMq__QueueName`, `RabbitMq__RoutingKey`, `RabbitMq__ConnectionTimeoutSeconds` | Publisher topology and initial connection timeout; defaults are `lead.events`, `lead.events`, `lead.created`, and 3 seconds |
+| `RabbitMq__ConsumerEnabled` | Enables the hosted consumer; false by default, true in Development configuration |
+| `RabbitMq__ConsumerPrefetchCount` | Maximum unacknowledged deliveries; default `1` |
+| `RabbitMq__MaximumRetryCount` | Retries after the initial processing attempt; default `5` |
+| `RabbitMq__InitialRetryDelayMilliseconds` / `RabbitMq__MaximumRetryDelayMilliseconds` | Exponential retry delay bounds; defaults `1000` and `30000` milliseconds |
+| `RabbitMq__RetryExchangeName`, `RabbitMq__RetryQueueName`, `RabbitMq__DeadLetterExchangeName`, `RabbitMq__DeadLetterQueueName` | Retry and dead-letter topology names |
 | `RequestCatcher__Enabled` | Enables inbound RequestCatcher observation; default `false` |
 | `RequestCatcher__BaseUrl` | RequestCatcher base URL; Development default is `https://webhooks.requestcatcher.com` |
 | `RequestCatcher__TimeoutSeconds` | RequestCatcher HTTP timeout; Development default is 2 seconds (validated range: 1–5) |
@@ -224,6 +238,8 @@ Test groups cover:
 - Salesforce DTO mapping and `SalesforceLeadClient` HTTP/error handling;
 - Salesforce Simulator creation, retrieval, update and configured failures;
 - async RabbitMQ acceptance, duplicate/concurrent submissions, status and publishing failures;
+- message processing, transient/permanent Salesforce outcomes, capped retry backoff, and failed-event diagnostics;
+- Salesforce Simulator idempotency for repeated idempotency keys;
 - RequestCatcher inbound payload normalization, disabled mode, HTTP/network/timeout failures and header leakage prevention.
 
 Run the suite from the solution root:
@@ -232,7 +248,7 @@ Run the suite from the solution root:
 dotnet test webhook-testing-integ.sln
 ```
 
-Verified during this README update: **46 passed, 0 failed, 0 skipped**. The tests use fakes and do not send requests to RequestCatcher or require a live RabbitMQ broker.
+The test suite currently contains **57 test cases**. Tests use controlled fakes and do not send requests to RequestCatcher or require a live RabbitMQ broker. Broker topology, TTL redelivery, ACK recovery, and DLQ behavior still need a separate live-broker integration test suite.
 
 ## Error Handling and Reliability
 
@@ -240,14 +256,15 @@ Verified during this README update: **46 passed, 0 failed, 0 skipped**. The test
 - Webhook API keys are compared using a fixed-time byte comparison. Webhook routes also have a fixed-window rate limiter.
 - Synchronous duplicate protection is in-memory and checks the event/idempotency key and email. Async event deduplication uses `SourcePlatform + EventId` in a separate in-memory event store.
 - `RabbitMqLeadMessagePublisher` uses persistent messages, durable exchange/queue declarations and publisher confirmations. The API returns `503` if it cannot confirm publishing.
+- The consumer ACKs completed messages and permanent/exhausted messages only after confirmed dead-letter routing. Transient failures are republished to a TTL retry queue with incremented retry metadata; the republish is confirmed before the original message is ACKed.
+- Simulator lead creation is idempotent for a supplied idempotency key during the current process lifetime.
 - `ProblemDetails` responses avoid returning internal exception detail to webhook callers. Structured logs use event/correlation metadata and avoid logging full lead payloads.
 - RequestCatcher is optional and best-effort; HTTP failures and timeout are logged without failing RabbitMQ acceptance.
 
 ## Current Limitations
 
-- There is **no RabbitMQ consumer or background worker**. Async events stay in the queue; event status remains `Accepted` and does not transition to `Processing`, `Completed` or `Failed`.
-- There is no retry policy, dead-letter queue, or failed-event listing endpoint.
-- Lead records and event/idempotency status are in memory and are lost when their application process restarts. RabbitMQ messages use a local persistent Docker volume, but the application’s status store is not durable.
+- Event status, duplicate reservations, lead records, and Simulator idempotency are in memory and are lost when their application process restarts. There is no database-backed Outbox or Inbox, so durable application state is not atomic with broker publication or CRM processing.
+- Retry and DLQ topology is implemented, but is not yet verified against a live RabbitMQ broker by automated integration tests. The failed-event endpoint is an in-memory diagnostic view, not a durable DLQ management or replay interface.
 - The synchronous route uses the Simulator, not Salesforce. The Simulator's records are also in memory.
 - RequestCatcher currently observes only inbound async webhooks. `/outgoing` and consumer-stage payload inspection are planned, not implemented.
 - RequestCatcher receives lead data when enabled. Keep it disabled outside controlled testing unless data handling is explicitly approved.
@@ -257,12 +274,11 @@ Verified during this README update: **46 passed, 0 failed, 0 skipped**. The test
 
 Planned work, not currently implemented:
 
-1. Add a RabbitMQ consumer/background service with manual acknowledgements and graceful shutdown.
-2. Add outbound RequestCatcher observation at consumer processing time, then call the Salesforce Simulator from the consumer.
-3. Add bounded retries with backoff and a dead-letter strategy.
-4. Replace in-memory status and lead repositories with durable persistence.
-5. Strengthen webhook authentication, secret management, monitoring and operational health checks.
-6. Add broker-backed integration tests and deployment configuration.
+1. Replace in-memory event status and idempotency with durable persistence and add a transactional Outbox/Inbox boundary.
+2. Add RabbitMQ-backed integration tests for publisher confirms, redelivery, TTL retry, DLQ routing, and shutdown recovery.
+3. Add OpenTelemetry traces and metrics for the webhook-to-consumer-to-Simulator flow.
+4. Add broker/database readiness checks, queue-depth alerts, and operational replay tooling.
+5. Add an optional real Salesforce adapter with secure OAuth configuration; keep the Simulator as the local default.
 
 ## Running Locally
 
@@ -291,7 +307,7 @@ Prerequisites: .NET 10 SDK and Docker with Docker Compose.
 
 4. Open the two Swagger UIs at `http://127.0.0.1:5187/swagger` and `http://127.0.0.1:5280/swagger`.
 
-The API launch profile sets `ASPNETCORE_ENVIRONMENT=Development`. For the sync route, both APIs must be running. For the async route, RabbitMQ must be running; a consumer is not present, so accepted messages accumulate in the queue.
+The API launch profile sets `ASPNETCORE_ENVIRONMENT=Development`. In Development the consumer is enabled, so RabbitMQ and the Salesforce Simulator should be running for the complete async flow. In other environments the consumer is disabled unless `RabbitMq__ConsumerEnabled=true` is configured.
 
 Example async request (set `WEBHOOK_API_KEY` to the same local key configured for the API):
 

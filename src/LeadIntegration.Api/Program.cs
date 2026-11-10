@@ -18,9 +18,34 @@ builder.Services.AddSingleton<MarketingLeadValidator>();
 builder.Services.AddSingleton<LeadMapper>();
 builder.Services.AddSingleton<SalesforceLeadMapper>();
 builder.Services.AddSingleton<ILeadRepository, InMemoryLeadRepository>();
-builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+builder.Services.AddOptions<RabbitMqOptions>()
+    .Bind(builder.Configuration.GetSection(RabbitMqOptions.SectionName))
+    .Validate(options => options.Port is > 0 and <= 65535 && options.ConnectionTimeoutSeconds > 0,
+        "RabbitMQ port and connection timeout must be valid positive values.")
+    .Validate(options => options.ConsumerPrefetchCount > 0 && options.MaximumRetryCount >= 0,
+        "RabbitMQ prefetch count must be positive and maximum retries cannot be negative.")
+    .Validate(options => options.InitialRetryDelayMilliseconds > 0 &&
+                         options.MaximumRetryDelayMilliseconds >= options.InitialRetryDelayMilliseconds &&
+                         options.ReconnectDelaySeconds > 0,
+        "RabbitMQ retry and reconnect delays must be positive and the maximum retry delay must not be smaller than the initial delay.")
+    .Validate(options => !string.IsNullOrWhiteSpace(options.ExchangeName) &&
+                         !string.IsNullOrWhiteSpace(options.QueueName) &&
+                         !string.IsNullOrWhiteSpace(options.RoutingKey) &&
+                         !string.IsNullOrWhiteSpace(options.RetryExchangeName) &&
+                         !string.IsNullOrWhiteSpace(options.RetryQueueName) &&
+                         !string.IsNullOrWhiteSpace(options.DeadLetterExchangeName) &&
+                         !string.IsNullOrWhiteSpace(options.DeadLetterQueueName),
+        "RabbitMQ exchange and queue names must be configured.")
+    .ValidateOnStart();
 builder.Services.AddSingleton<ILeadEventStore, InMemoryLeadEventStore>();
+builder.Services.AddSingleton<IRabbitMqConnectionProvider, RabbitMqConnectionProvider>();
 builder.Services.AddSingleton<ILeadMessagePublisher, RabbitMqLeadMessagePublisher>();
+builder.Services.AddSingleton<LeadProcessingMessageValidator>();
+builder.Services.AddScoped<ILeadMessageProcessor, LeadMessageProcessor>();
+if (builder.Configuration.GetValue<bool>($"{RabbitMqOptions.SectionName}:ConsumerEnabled"))
+{
+    builder.Services.AddHostedService<LeadProcessingBackgroundService>();
+}
 builder.Services.AddScoped<ILeadEventAcceptanceService, LeadEventAcceptanceService>();
 builder.Services.AddOptions<RequestCatcherOptions>()
     .Bind(builder.Configuration.GetSection(RequestCatcherOptions.SectionName))

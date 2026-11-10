@@ -7,18 +7,19 @@ using RabbitMQ.Client.Exceptions;
 
 namespace LeadIntegration.Api.Features.Messaging;
 
-public sealed class RabbitMqLeadMessagePublisher : ILeadMessagePublisher, IAsyncDisposable
+public sealed class RabbitMqLeadMessagePublisher : ILeadMessagePublisher
 {
     private readonly RabbitMqOptions _options;
+    private readonly IRabbitMqConnectionProvider _connectionProvider;
     private readonly ILogger<RabbitMqLeadMessagePublisher> _logger;
-    private readonly SemaphoreSlim _connectionLock = new(1, 1);
-    private IConnection? _connection;
 
     public RabbitMqLeadMessagePublisher(
         IOptions<RabbitMqOptions> options,
+        IRabbitMqConnectionProvider connectionProvider,
         ILogger<RabbitMqLeadMessagePublisher> logger)
     {
         _options = options.Value;
+        _connectionProvider = connectionProvider;
         _logger = logger;
     }
 
@@ -26,7 +27,7 @@ public sealed class RabbitMqLeadMessagePublisher : ILeadMessagePublisher, IAsync
     {
         try
         {
-            var connection = await GetConnectionAsync(cancellationToken);
+            var connection = await _connectionProvider.GetConnectionAsync(cancellationToken);
             var channelOptions = new CreateChannelOptions(
                 publisherConfirmationsEnabled: true,
                 publisherConfirmationTrackingEnabled: true);
@@ -92,69 +93,7 @@ public sealed class RabbitMqLeadMessagePublisher : ILeadMessagePublisher, IAsync
         }
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        if (_connection is not null)
-        {
-            await _connection.DisposeAsync();
-        }
-
-        _connectionLock.Dispose();
-    }
-
-    private async Task<IConnection> GetConnectionAsync(CancellationToken cancellationToken)
-    {
-        if (_connection is { IsOpen: true })
-        {
-            return _connection;
-        }
-
-        if (string.IsNullOrWhiteSpace(_options.UserName) || string.IsNullOrWhiteSpace(_options.Password))
-        {
-            throw new RabbitMqUnavailableException(
-                "RabbitMQ credentials are not configured. Set RabbitMq__UserName and RabbitMq__Password.");
-        }
-
-        await _connectionLock.WaitAsync(cancellationToken);
-        try
-        {
-            if (_connection is { IsOpen: true })
-            {
-                return _connection;
-            }
-
-            if (_connection is not null)
-            {
-                await _connection.DisposeAsync();
-                _connection = null;
-            }
-
-            var factory = new ConnectionFactory
-            {
-                HostName = _options.HostName,
-                Port = _options.Port,
-                VirtualHost = _options.VirtualHost,
-                UserName = _options.UserName,
-                Password = _options.Password,
-                RequestedConnectionTimeout = TimeSpan.FromSeconds(_options.ConnectionTimeoutSeconds),
-                AutomaticRecoveryEnabled = true,
-                ClientProvidedName = "LeadIntegration.Api publisher"
-            };
-
-            _connection = await factory.CreateConnectionAsync(cancellationToken);
-            return _connection;
-        }
-        finally
-        {
-            _connectionLock.Release();
-        }
-    }
-
     private static bool IsBrokerFailure(Exception exception) => exception is
-        BrokerUnreachableException or
-        AlreadyClosedException or
-        OperationInterruptedException or
-        IOException or
-        SocketException or
-        TimeoutException;
+        RabbitMqUnavailableException or BrokerUnreachableException or AlreadyClosedException or
+        OperationInterruptedException or PublishException or IOException or SocketException or TimeoutException;
 }

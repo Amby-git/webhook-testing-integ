@@ -25,6 +25,26 @@ public sealed class SalesforceSimulatorApiTests
     }
 
     [Fact]
+    public async Task CreateLead_RepeatedIdempotencyKey_ReturnsExistingSalesforceRecord()
+    {
+        using var factory = new SalesforceSimulatorApiFactory();
+        using var client = factory.CreateClient();
+        using var firstRequest = CreateIdempotentRequest("HubSpot:event-77");
+        using var duplicateRequest = CreateIdempotentRequest("HubSpot:event-77");
+
+        using var first = await client.SendAsync(firstRequest);
+        using var duplicate = await client.SendAsync(duplicateRequest);
+        var firstRecord = await first.Content.ReadFromJsonAsync<SalesforceLeadResponse>();
+        var duplicateRecord = await duplicate.Content.ReadFromJsonAsync<SalesforceLeadResponse>();
+        var all = await client.GetFromJsonAsync<SalesforceLeadRecordResponse[]>("/api/salesforce/leads");
+
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+        Assert.Equal(firstRecord?.Id, duplicateRecord?.Id);
+        Assert.Single(all!);
+    }
+
+    [Fact]
     public async Task CreateWithoutCompanyReturns400ValidationProblem()
     {
         using var factory = new SalesforceSimulatorApiFactory();
@@ -123,6 +143,9 @@ public sealed class SalesforceSimulatorApiTests
         Assert.Equal(true, status?["simulated"]?.GetValue<bool>());
         Assert.NotNull(createOperation?["requestBody"]?["content"]?["application/json"]?["examples"]);
         Assert.NotNull(createOperation?["responses"]?["201"]?["content"]?["application/json"]?["example"]);
+        Assert.NotNull(createOperation?["responses"]?["200"]?["content"]?["application/json"]?["example"]);
+        Assert.Contains(createOperation?["parameters"]?.AsArray() ?? [], parameter =>
+            parameter?["name"]?.GetValue<string>() == "Idempotency-Key");
         Assert.NotNull(createOperation?["responses"]?["429"]);
         Assert.NotNull(createOperation?["responses"]?["500"]);
         Assert.NotNull(createOperation?["responses"]?["503"]);
@@ -148,4 +171,16 @@ public sealed class SalesforceSimulatorApiTests
         LeadSource: "HubSpot",
         ExternalLeadId: "mkt-001",
         CampaignId: "spring-2026");
+
+    private static HttpRequestMessage CreateIdempotentRequest(string key)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/salesforce/leads")
+        {
+            Content = JsonContent.Create(ValidSalesforceLead())
+        };
+        request.Headers.Add("Idempotency-Key", key);
+        return request;
+    }
+
+    private sealed record SalesforceLeadRecordResponse(string Id);
 }

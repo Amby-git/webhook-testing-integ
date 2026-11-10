@@ -6,7 +6,8 @@ public interface ISalesforceLeadClient
 {
     Task<SalesforceCallResult<SalesforceLeadResponse>> CreateLeadAsync(
         SalesforceLeadDto lead,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? idempotencyKey = null);
 
     Task<SalesforceCallResult<SalesforceSimulatorStatusResponse>> GetStatusAsync(
         CancellationToken cancellationToken);

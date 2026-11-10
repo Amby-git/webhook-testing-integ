@@ -31,7 +31,8 @@ internal sealed class TestApiFactory(
                 ["SalesforceSimulator:BaseUrl"] = "http://127.0.0.1:5280/",
                 ["SalesforceSimulator:TimeoutSeconds"] = "10",
                 ["WebhookRateLimit:PermitLimit"] = webhookPermitLimit.ToString(),
-                ["WebhookRateLimit:WindowSeconds"] = "60"
+                ["WebhookRateLimit:WindowSeconds"] = "60",
+                ["RabbitMq:ConsumerEnabled"] = "false"
             }));
 
         if (throwOnLeadRead)
@@ -124,7 +125,8 @@ internal sealed class TestApiFactory(
 
         public Task<SalesforceCallResult<SalesforceLeadResponse>> CreateLeadAsync(
             SalesforceLeadDto lead,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string? idempotencyKey = null)
         {
             Interlocked.Increment(ref _createCount);
             return Task.FromResult(failure == SalesforceClientFailure.None

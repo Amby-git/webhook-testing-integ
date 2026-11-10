@@ -17,6 +17,7 @@ public static class SalesforceLeadEndpoints
             .WithDescription("Requires LastName, Email, and Company for this simulated B2B Lead scenario. This is not a real Salesforce connection.")
             .Accepts<SalesforceLeadDto>("application/json")
             .Produces<SalesforceLeadResponse>(StatusCodes.Status201Created)
+            .Produces<SalesforceLeadResponse>(StatusCodes.Status200OK)
             .ProducesValidationProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .ProducesProblem(StatusCodes.Status500InternalServerError)
@@ -56,6 +57,7 @@ public static class SalesforceLeadEndpoints
 
     private static IResult CreateAsync(
         SalesforceLeadDto request,
+        HttpContext httpContext,
         SalesforceLeadValidator validator,
         ISalesforceLeadRepository repository)
     {
@@ -63,6 +65,15 @@ public static class SalesforceLeadEndpoints
         if (errors.Count > 0)
         {
             return Results.ValidationProblem(errors, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var idempotencyKey = httpContext.Request.Headers["Idempotency-Key"].ToString();
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            var (record, created) = repository.CreateOrGet(request, idempotencyKey.Trim());
+            return created
+                ? Results.Created($"/api/salesforce/leads/{record.Id}", record.ToResponse())
+                : Results.Ok(record.ToResponse());
         }
 
         var lead = repository.Create(request);

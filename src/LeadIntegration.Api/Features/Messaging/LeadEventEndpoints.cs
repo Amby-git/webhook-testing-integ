@@ -33,6 +33,14 @@ public static class LeadEventEndpoints
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status404NotFound);
 
+        endpoints.MapGet("/integration/events/failed", GetFailedEvents)
+            .AddEndpointFilter<WebhookApiKeyFilter>()
+            .WithName("GetFailedLeadEvents")
+            .WithTags("Integration Events")
+            .WithSummary("Lists in-memory lead events that failed processing.")
+            .Produces<IReadOnlyCollection<LeadEventStatus>>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status401Unauthorized);
+
         return endpoints;
     }
 
@@ -83,6 +91,8 @@ public static class LeadEventEndpoints
                 detail: "No accepted event matches the supplied source platform and event ID.")
             : Results.Ok(status);
     }
+
+    private static IResult GetFailedEvents(ILeadEventStore eventStore) => Results.Ok(eventStore.GetFailed());
 
     private static IResult AcceptedResult(LeadEventStatus eventStatus)
     {

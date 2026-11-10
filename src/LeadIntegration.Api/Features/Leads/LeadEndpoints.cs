@@ -47,7 +47,7 @@ public static class LeadEndpoints
             .WithSummary("Accepts a lead webhook request for local processing.")
             .WithDescription("Requires X-Webhook-Api-Key. The validated marketing event is mapped to the Salesforce contract and sent synchronously to the separately hosted Salesforce simulator. No real Salesforce environment is contacted.")
             .Accepts<MarketingLeadWebhookRequest>("application/json")
-            .Produces<LeadResponse>(StatusCodes.Status202Accepted)
+            .Produces<LeadResponse>(StatusCodes.Status201Created)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status409Conflict)
@@ -126,7 +126,7 @@ public static class LeadEndpoints
             cancellationToken);
         return result.Status switch
         {
-            LeadProcessingStatus.Created => Results.Accepted($"/leads/{result.Lead!.Id}", mapper.ToResponse(result.Lead)),
+            LeadProcessingStatus.Created => Results.Created($"/leads/{result.Lead!.Id}", mapper.ToResponse(result.Lead)),
             LeadProcessingStatus.ValidationFailed => Results.ValidationProblem(result.ValidationErrors!, statusCode: StatusCodes.Status400BadRequest),
             LeadProcessingStatus.DuplicateEmail => Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Duplicate lead", detail: "A lead with this email address already exists."),
             LeadProcessingStatus.DuplicateRequest => Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Duplicate event", detail: "This event or idempotency key has already been processed."),

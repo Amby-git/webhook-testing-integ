@@ -6,6 +6,8 @@ namespace Salesforce.Simulator.Api.Features.Leads;
 public sealed class InMemorySalesforceLeadRepository : ISalesforceLeadRepository
 {
     private readonly ConcurrentDictionary<string, SalesforceLeadRecord> _leads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _recordIdsByIdempotencyKey = new(StringComparer.Ordinal);
+    private readonly object _idempotencyLock = new();
 
     public SalesforceLeadRecord Create(SalesforceLeadDto lead)
     {
@@ -17,6 +19,22 @@ public sealed class InMemorySalesforceLeadRepository : ISalesforceLeadRepository
             {
                 return record;
             }
+        }
+    }
+
+    public (SalesforceLeadRecord Record, bool Created) CreateOrGet(SalesforceLeadDto lead, string idempotencyKey)
+    {
+        lock (_idempotencyLock)
+        {
+            if (_recordIdsByIdempotencyKey.TryGetValue(idempotencyKey, out var existingId) &&
+                _leads.TryGetValue(existingId, out var existing))
+            {
+                return (existing, false);
+            }
+
+            var created = Create(lead);
+            _recordIdsByIdempotencyKey[idempotencyKey] = created.Id;
+            return (created, true);
         }
     }
 

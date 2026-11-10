@@ -19,7 +19,9 @@ public sealed class SalesforceSimulatorOpenApiTransformer : IOpenApiOperationTra
         {
             AddRequestExample(operation, "Salesforce Lead", "A valid B2B Lead payload.",
                 """{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","phone":"+35312345678","company":"Analytical Engines Ltd","leadSource":"HubSpot","externalLeadId":"mkt-001","campaignId":"spring-2026"}""");
+            AddHeader(operation, "Idempotency-Key", required: false, "HubSpot:event-001");
             AddResponseExample(operation, "201", LeadResponseJson);
+            AddResponseExample(operation, "200", LeadResponseJson);
         }
         else if (path == "api/salesforce/leads" && method == "GET")
         {
@@ -57,6 +59,7 @@ public sealed class SalesforceSimulatorOpenApiTransformer : IOpenApiOperationTra
     private static string ResponseDescription(string path, string method, string status) => (path, method, status) switch
     {
         ("api/salesforce/leads", "POST", "201") => "The Lead was created in the simulator and a Location header identifies the record.",
+        ("api/salesforce/leads", "POST", "200") => "The idempotency key matched a previously created Lead; the existing record was returned.",
         ("api/salesforce/leads", "POST", "400") => "Required Salesforce Lead fields are missing or invalid.",
         ("api/salesforce/status", "GET", "503") => "The simulator is configured as unavailable.",
         (_, _, "400") => "Required Salesforce Lead fields are missing or invalid.",
@@ -122,5 +125,19 @@ public sealed class SalesforceSimulatorOpenApiTransformer : IOpenApiOperationTra
         {
             id.Example = JsonValue.Create("00Q3A40C6277C54F6A");
         }
+    }
+
+    private static void AddHeader(OpenApiOperation operation, string name, bool required, string example)
+    {
+        operation.Parameters ??= [];
+        operation.Parameters.Add(new OpenApiParameter
+        {
+            Name = name,
+            In = ParameterLocation.Header,
+            Required = required,
+            Description = "Optional stable key used to make repeated lead creation requests idempotent.",
+            Schema = new OpenApiSchema { Type = JsonSchemaType.String },
+            Example = JsonValue.Create(example)
+        });
     }
 }

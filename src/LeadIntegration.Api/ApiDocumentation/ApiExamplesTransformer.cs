@@ -24,7 +24,7 @@ public sealed class ApiExamplesTransformer : IOpenApiOperationTransformer
                 """{"externalLeadId":"mkt-001","sourcePlatform":"HubSpot","firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","company":"Analytical Engines Ltd","phone":"+35312345678","campaignId":"spring-2026","createdAt":"2026-11-09T10:15:00Z","eventId":"event-001"}""");
             AddHeader(operation, "X-Webhook-Api-Key", required: true, "local-dev-key");
             AddHeader(operation, "Idempotency-Key", required: false, "campaign-42-ada-001");
-            AddResponseExample(operation, "202", ExampleLeadJson);
+            AddResponseExample(operation, "201", ExampleLeadJson);
         }
         else if (path == "webhooks/leads/async")
         {
@@ -38,6 +38,11 @@ public sealed class ApiExamplesTransformer : IOpenApiOperationTransformer
         {
             AddHeader(operation, "X-Webhook-Api-Key", required: true, "local-dev-key");
             AddResponseExample(operation, "200", """{"eventId":"event-async-001","sourcePlatform":"HubSpot","correlationId":"corr-async-001","status":"Accepted","attemptCount":0,"createdAt":"2026-11-09T10:15:00Z","lastUpdatedAt":"2026-11-09T10:15:00Z","failureReason":null}""");
+        }
+        else if (path == "integration/events/failed")
+        {
+            AddHeader(operation, "X-Webhook-Api-Key", required: true, "local-dev-key");
+            AddResponseExample(operation, "200", """[{"eventId":"event-async-001","sourcePlatform":"HubSpot","correlationId":"corr-async-001","status":"Failed","attemptCount":6,"createdAt":"2026-11-09T10:15:00Z","lastUpdatedAt":"2026-11-09T10:15:30Z","failureReason":"Retry limit reached after Salesforce failure Unavailable.","salesforceId":null}]""");
         }
         else if (path == "leads" && method == "GET")
         {
@@ -112,7 +117,7 @@ public sealed class ApiExamplesTransformer : IOpenApiOperationTransformer
 
     private static string ResponseDescription(string path, string method, string statusCode) => (path, method, statusCode) switch
     {
-        ("webhooks/leads", "POST", "202") => "Salesforce created the lead and the returned Salesforce record ID was stored locally.",
+        ("webhooks/leads", "POST", "201") => "Salesforce created the lead and the integration API stored its local representation.",
         ("webhooks/leads/async", "POST", "202") => "RabbitMQ confirmed the event publish. Salesforce processing has not necessarily completed.",
         ("webhooks/leads/async", "POST", "503") => "RabbitMQ did not confirm the event publish; the API did not accept the event.",
         ("webhooks/leads/async", "POST", "409") => "An event with this source platform and event ID has already been accepted.",

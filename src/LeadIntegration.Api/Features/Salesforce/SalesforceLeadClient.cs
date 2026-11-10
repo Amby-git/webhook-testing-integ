@@ -10,16 +10,23 @@ public sealed class SalesforceLeadClient(HttpClient httpClient, ILogger<Salesfor
 {
     public async Task<SalesforceCallResult<SalesforceLeadResponse>> CreateLeadAsync(
         SalesforceLeadDto lead,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? idempotencyKey = null)
     {
         try
         {
-            using var response = await httpClient.PostAsJsonAsync(
-                "api/salesforce/leads",
-                lead,
-                cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "api/salesforce/leads")
+            {
+                Content = JsonContent.Create(lead)
+            };
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+            }
 
-            if (response.StatusCode == HttpStatusCode.Created)
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+
+            if (response.StatusCode is HttpStatusCode.Created or HttpStatusCode.OK)
             {
                 var createdLead = await response.Content.ReadFromJsonAsync<SalesforceLeadResponse>(
                     cancellationToken: cancellationToken);
@@ -29,7 +36,7 @@ public sealed class SalesforceLeadClient(HttpClient httpClient, ILogger<Salesfor
                     : SalesforceCallResult<SalesforceLeadResponse>.Failed(SalesforceClientFailure.UnexpectedResponse);
             }
 
-            return SalesforceCallResult<SalesforceLeadResponse>.Failed(MapFailure(response.StatusCode));
+            return Failure<SalesforceLeadResponse>(response);
         }
         catch (HttpRequestException exception)
         {
@@ -63,7 +70,7 @@ public sealed class SalesforceLeadClient(HttpClient httpClient, ILogger<Salesfor
                     : SalesforceCallResult<SalesforceSimulatorStatusResponse>.Failed(SalesforceClientFailure.UnexpectedResponse);
             }
 
-            return SalesforceCallResult<SalesforceSimulatorStatusResponse>.Failed(MapFailure(response.StatusCode));
+            return Failure<SalesforceSimulatorStatusResponse>(response);
         }
         catch (HttpRequestException exception)
         {
@@ -82,12 +89,28 @@ public sealed class SalesforceLeadClient(HttpClient httpClient, ILogger<Salesfor
         }
     }
 
+    private static SalesforceCallResult<T> Failure<T>(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter?.Delta;
+        if (retryAfter is null && response.Headers.RetryAfter?.Date is { } date)
+        {
+            retryAfter = date - DateTimeOffset.UtcNow;
+        }
+
+        return SalesforceCallResult<T>.Failed(
+            MapFailure(response.StatusCode),
+            (int)response.StatusCode,
+            retryAfter is { } delay && delay > TimeSpan.Zero ? delay : null);
+    }
+
     private static SalesforceClientFailure MapFailure(HttpStatusCode statusCode) => statusCode switch
     {
         HttpStatusCode.BadRequest => SalesforceClientFailure.Validation,
         HttpStatusCode.TooManyRequests => SalesforceClientFailure.RateLimited,
         HttpStatusCode.InternalServerError => SalesforceClientFailure.InternalServerError,
         HttpStatusCode.ServiceUnavailable => SalesforceClientFailure.Unavailable,
+        HttpStatusCode.BadGateway => SalesforceClientFailure.BadGateway,
+        HttpStatusCode.GatewayTimeout => SalesforceClientFailure.GatewayTimeout,
         _ => SalesforceClientFailure.UnexpectedResponse
     };
 }

@@ -16,7 +16,7 @@ public sealed class LeadApiTests
 
         using var response = await PostLeadAsync(client, "ada@example.com", "request-1");
 
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.True(response.Headers.Location is not null);
 
         var acceptedLead = await response.Content.ReadFromJsonAsync<LeadResponse>();
@@ -92,7 +92,7 @@ public sealed class LeadApiTests
         using var duplicateEmail = await PostLeadAsync(client, "DUPLICATE@example.com", "second-key");
         using var duplicateKey = await PostLeadAsync(client, "other@example.com", "first-key");
 
-        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, duplicateEmail.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, duplicateKey.StatusCode);
     }
@@ -138,7 +138,7 @@ public sealed class LeadApiTests
         using var first = await PostLeadAsync(client, "first-limit@example.com", "limit-1");
         using var limited = await PostLeadAsync(client, "second-limit@example.com", "limit-2");
 
-        Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
     }
 
@@ -196,7 +196,7 @@ public sealed class LeadApiTests
         var submitted = await response.Content.ReadFromJsonAsync<LeadResponse>();
         var records = await simulator.CreateClient().GetFromJsonAsync<JsonNode[]>("/api/salesforce/leads");
 
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.Equal("00Q", submitted?.SalesforceId[..3]);
         Assert.Single(records!);
     }
@@ -223,7 +223,7 @@ public sealed class LeadApiTests
         var webhook = document?["paths"]?["/webhooks/leads"]?["post"];
 
         Assert.NotNull(webhook?["requestBody"]?["content"]?["application/json"]?["examples"]);
-        Assert.NotNull(webhook?["responses"]?["202"]?["content"]?["application/json"]?["example"]);
+        Assert.NotNull(webhook?["responses"]?["201"]?["content"]?["application/json"]?["example"]);
         Assert.NotNull(webhook?["responses"]?["401"]);
         Assert.NotNull(webhook?["responses"]?["409"]);
         Assert.NotNull(webhook?["responses"]?["422"]);
